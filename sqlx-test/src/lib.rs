@@ -2,6 +2,8 @@ use sqlx::pool::PoolOptions;
 use sqlx::{Connection, Database, Pool};
 use std::env;
 
+#[sqlx_macros::test(migrations = false)]
+
 pub fn setup_if_needed() {
     let _ = dotenvy::dotenv();
     let _ = env_logger::builder().is_test(true).try_init();
@@ -105,8 +107,8 @@ macro_rules! test_prepared_type {
 macro_rules! test_unprepared_type {
     ($name:ident<$ty:ty>($db:ident, $($text:literal == $value:expr),+ $(,)?)) => {
         paste::item! {
-            #[sqlx_macros::test]
-            async fn [< test_unprepared_type_ $name >] () -> anyhow::Result<()> {
+            #[sqlx_macros::test(db_env_var = "DATABASE_URL")]
+            async fn [< test_unprepared_type_ $name >] (pool: sqlx::Pool<$db>) -> anyhow::Result<()> {
                 use sqlx::prelude::*;
                 use futures_util::TryStreamExt;
 

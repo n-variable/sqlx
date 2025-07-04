@@ -105,7 +105,8 @@ impl TestSupport for MySql {
 }
 
 async fn test_context(args: &TestArgs) -> Result<TestContext<MySql>, Error> {
-    let url = dotenvy::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let env_var = args.db_env_var.unwrap_or("DATABASE_URL");
+    let url = dotenvy::var(env_var).unwrap_or_else(|_| panic!("{} must be set", env_var));
 
     let master_opts = MySqlConnectOptions::from_str(&url).expect("failed to parse DATABASE_URL");
 

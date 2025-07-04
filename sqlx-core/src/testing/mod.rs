@@ -65,6 +65,7 @@ pub struct TestArgs {
     pub test_path: &'static str,
     pub migrator: Option<&'static Migrator>,
     pub fixtures: &'static [TestFixture],
+    pub db_env_var: Option<&'static str>,
 }
 
 pub trait TestFn {
@@ -157,6 +158,7 @@ impl TestArgs {
             test_path,
             migrator: None,
             fixtures: &[],
+            db_env_var: None,
         }
     }
 
@@ -166,6 +168,10 @@ impl TestArgs {
 
     pub fn fixtures(&mut self, fixtures: &'static [TestFixture]) {
         self.fixtures = fixtures;
+    }
+
+    pub fn db_env_var(&mut self, var: &'static str) {
+        self.db_env_var = Some(var);
     }
 }
 

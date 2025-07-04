@@ -6,6 +6,7 @@ use syn::parse::Parser;
 struct Args {
     fixtures: Vec<(FixturesType, Vec<syn::LitStr>)>,
     migrations: MigrationsOpt,
+    db_env_var: Option<syn::LitStr>,
 }
 
 #[cfg(feature = "migrate")]
@@ -86,6 +87,11 @@ fn expand_advanced(args: AttributeArgs, input: syn::ItemFn) -> crate::Result<Tok
     let attrs = &input.attrs;
 
     let args = parse_args(args)?;
+    let env_var_stmt = if let Some(lit) = &args.db_env_var {
+        quote! { args.db_env_var(#lit); }
+    } else {
+        quote! { args.db_env_var("DATABASE_URL"); }
+    };
 
     let fn_arg_types = inputs.iter().map(|_| quote! { _ });
 
@@ -175,7 +181,7 @@ fn expand_advanced(args: AttributeArgs, input: syn::ItemFn) -> crate::Result<Tok
             }
 
             let mut args = ::sqlx::testing::TestArgs::new(concat!(module_path!(), "::", stringify!(#name)));
-
+            #env_var_stmt
             #migrations
 
             args.fixtures(&[#(#fixtures),*]);
@@ -197,6 +203,7 @@ fn parse_args(attr_args: AttributeArgs) -> syn::Result<Args> {
 
     let mut fixtures = Vec::new();
     let mut migrations = MigrationsOpt::InferredPath;
+    let mut db_env_var: Option<LitStr> = None;
 
     for arg in attr_args {
         let path = arg.path().clone();
@@ -292,10 +299,20 @@ fn parse_args(attr_args: AttributeArgs) -> syn::Result<Args> {
 
                 migrations = MigrationsOpt::ExplicitMigrator(lit.parse()?);
             }
+            // env_var = "<ENV_VAR_NAME>"
+            Meta::NameValue(MetaNameValue { value, .. }) if path.is_ident("db_env_var") => {
+                if db_env_var.is_some() {
+                    return Err(syn::Error::new_spanned(value, "cannot have more than one `db_env_var` arg"));
+                }
+                let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit), .. }) = &value else {
+                    return Err(syn::Error::new_spanned(value, "expected string literal for `db_env_var`"));
+                };
+                db_env_var = Some(lit.clone());
+            }
             arg => {
                 return Err(syn::Error::new_spanned(
                     arg,
-                    r#"expected `fixtures("<filename>", ...)` or `migrations = "<path>" | false` or `migrator = "<rust path>"`"#,
+                    r#"expected `fixtures("<filename>", ...)`, `migrations = "<path>" | false`, `migrator = "<rust path>"`, or `db_env_var = "<env_var>"`"#,
                 ))
             }
         }
@@ -304,6 +321,7 @@ fn parse_args(attr_args: AttributeArgs) -> syn::Result<Args> {
     Ok(Args {
         fixtures,
         migrations,
+        db_env_var,
     })
 }
 
