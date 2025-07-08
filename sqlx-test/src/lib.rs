@@ -2,8 +2,6 @@ use sqlx::pool::PoolOptions;
 use sqlx::{Connection, Database, Pool};
 use std::env;
 
-#[sqlx_macros::test(migrations = false)]
-
 pub fn setup_if_needed() {
     let _ = dotenvy::dotenv();
     let _ = env_logger::builder().is_test(true).try_init();
