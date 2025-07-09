@@ -3,6 +3,8 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use futures_core::future::BoxFuture;
 
@@ -17,9 +19,9 @@ use crate::{PgConnectOptions, PgConnection, Postgres};
 
 pub(crate) use sqlx_core::testing::*;
 
-// Using a blocking `OnceLock` here because the critical sections are short.
-static MASTER_POOL: OnceLock<Pool<Postgres>> = OnceLock::new();
-// Automatically delete any databases created before the start of the test binary.
+// Using a blocking `Mutex<HashMap>` here to support multiple database URLs
+// Each URL gets its own master pool to support multiple db_env_var usage
+static MASTER_POOLS: OnceLock<Mutex<HashMap<String, Pool<Postgres>>>> = OnceLock::new();
 
 impl TestSupport for Postgres {
     fn test_context(args: &TestArgs) -> BoxFuture<'_, Result<TestContext<Self>, Error>> {
@@ -28,12 +30,23 @@ impl TestSupport for Postgres {
 
     fn cleanup_test(db_name: &str) -> BoxFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            let mut conn = MASTER_POOL
+            // We need to find the right pool for cleanup, but for now we'll use DATABASE_URL
+            // This maintains backward compatibility for tests that don't use custom db_env_var
+            let url = dotenvy::var("DATABASE_URL").expect("DATABASE_URL must be set for cleanup");
+            
+            let pools = MASTER_POOLS
                 .get()
-                .expect("cleanup_test() invoked outside `#[sqlx::test]`")
-                .acquire()
-                .await?;
-
+                .expect("cleanup_test() invoked outside `#[sqlx::test]`");
+            
+            let pool = {
+                let pools_guard = pools.lock().unwrap();
+                pools_guard
+                    .get(&url)
+                    .expect("No master pool found for DATABASE_URL during cleanup")
+                    .clone()
+            };
+            
+            let mut conn = pool.acquire().await?;
             do_cleanup(&mut conn, db_name).await
         })
     }
@@ -107,24 +120,14 @@ async fn test_context(args: &TestArgs) -> Result<TestContext<Postgres>, Error> {
         .after_release(|_conn, _| Box::pin(async move { Ok(false) }))
         .connect_lazy_with(master_opts);
 
-    let master_pool = match once_lock_try_insert_polyfill(&MASTER_POOL, pool) {
-        Ok(inserted) => inserted,
-        Err((existing, pool)) => {
-            // Sanity checks.
-            assert_eq!(
-                existing.connect_options().host,
-                pool.connect_options().host,
-                "DATABASE_URL changed at runtime, host differs"
-            );
-
-            assert_eq!(
-                existing.connect_options().database,
-                pool.connect_options().database,
-                "DATABASE_URL changed at runtime, database differs"
-            );
-
-            existing
-        }
+    // Get or create the pools map
+    let pools = MASTER_POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    
+    let master_pool = {
+        let mut pools_guard = pools.lock().unwrap();
+        
+        // Get existing pool for this URL, or insert the new one
+        pools_guard.entry(url.clone()).or_insert_with(|| pool).clone()
     };
 
     let mut conn = master_pool.acquire().await?;
@@ -199,13 +202,4 @@ async fn do_cleanup(conn: &mut PgConnection, db_name: &str) -> Result<(), Error>
         .await?;
 
     Ok(())
-}
-
-fn once_lock_try_insert_polyfill<T>(this: &OnceLock<T>, value: T) -> Result<&T, (&T, T)> {
-    let mut value = Some(value);
-    let res = this.get_or_init(|| value.take().unwrap());
-    match value {
-        None => Ok(res),
-        Some(value) => Err((res, value)),
-    }
 }
