@@ -30,30 +30,57 @@ impl TestSupport for Postgres {
 
     fn cleanup_test(db_name: &str) -> BoxFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            // We need to find the right pool for cleanup, but for now we'll use DATABASE_URL
-            // This maintains backward compatibility for tests that don't use custom db_env_var
-            let url = dotenvy::var("DATABASE_URL").expect("DATABASE_URL must be set for cleanup");
-            
             let pools = MASTER_POOLS
                 .get()
                 .expect("cleanup_test() invoked outside `#[sqlx::test]`");
             
-            let pool = {
+            // Get all available pools
+            let available_pools: Vec<Pool<Postgres>> = {
                 let pools_guard = pools.lock().unwrap();
-                pools_guard
-                    .get(&url)
-                    .expect("No master pool found for DATABASE_URL during cleanup")
-                    .clone()
+                pools_guard.values().cloned().collect()
             };
             
-            let mut conn = pool.acquire().await?;
-            do_cleanup(&mut conn, db_name).await
+            let mut last_error = None;
+            
+            // Try each pool until one succeeds
+            for pool in available_pools {
+                match pool.acquire().await {
+                    Ok(mut conn) => {
+                        match do_cleanup(&mut conn, db_name).await {
+                            Ok(()) => return Ok(()),
+                            Err(e) => {
+                                last_error = Some(e);
+                                continue;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        last_error = Some(e.into());
+                        continue;
+                    }
+                }
+            }
+            
+            // If we get here, all pools failed
+            Err(last_error.unwrap_or_else(|| Error::Protocol("No pools available for cleanup".into())))
         })
     }
 
     fn cleanup_test_dbs() -> BoxFuture<'static, Result<Option<usize>, Error>> {
         Box::pin(async move {
-            let url = dotenvy::var("DATABASE_URL").expect("DATABASE_URL must be set");
+            // Try DATABASE_URL first for backward compatibility, then try any available pools
+            let url = match dotenvy::var("DATABASE_URL") {
+                Ok(url) => url,
+                Err(_) => {
+                    // If DATABASE_URL is not set, try to get any URL from the pools
+                    MASTER_POOLS.get()
+                        .and_then(|pools| {
+                            let pools_guard = pools.lock().unwrap();
+                            pools_guard.keys().next().cloned()
+                        })
+                        .expect("DATABASE_URL must be set or pools must be available")
+                }
+            };
 
             let mut conn = PgConnection::connect(&url).await?;
 
